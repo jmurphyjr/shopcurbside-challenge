@@ -3,86 +3,215 @@
  */
 (function() {
     var CURBSIDE_CHALLENGE_URL = 'http://challenge.shopcurbside.com';
+    var lastTime;
+    var timer = Date.now() + 20000;
+    var pending = false;
+    var lastResponse = '';
 
-    var Header = function() {
-        this.sessionID = null;
-        this.header = null;
+    var previousFailedRequest = document.getElementById('prev-failed-request');
 
+    var secretElement = document.getElementById('curbside-secret');
+    var button = document.getElementById('execute-next-step');
+    var nextRequest = document.getElementById('next-request');
+    var currentResponse = document.getElementById('current-response');
+    var currentError = document.getElementById('current-error');
+    var currentSessionId = document.getElementById('current-session-id');
+
+    var sessionId = null;
+
+    var nextUrl = ['start'];
+    var curbsideSecret = '';
+
+    var Curbside = function() {
+        this.messages = [];
     };
 
-    Header.prototype._updateSessionId = function() {
-        this.sessionID = makeRequest('get-session');
-    };
-
-    Header.prototype.updateHeader = function() {
-        this._updateSessionId();
-        this.header = { 'Session': this.sessionID };
-    };
-
-    Header.prototype.getHeader = function() {
-        return self.header;
-    };
-
-
-    var processResponse = function(data) {
-        console.log(data.responseType);
-        if (data.responseType === 'application/json') {
-            console.log('Json data received');
-            console.log(data);
-        }
-        else {
-            console.log('not json data');
-            console.log(data);
-        }
-    };
-
-    /**
-     * Error callback for makeRequest.
-     * @param error
-     */
-    var processError = function(error) {
-        var response = JSON.parse(error.responseText);
-        console.log(response.error);
-        if (response.error.indexOf('header is missing') >= 0) {
-            // Need to issue 'get-session'
-            console.log('going to make request');
-            makeRequest('get-session').then(processResponse, processError);
-        }
-        console.log(JSON.parse(error.responseText));
-    };
-
-    var makeRequest = function(path) {
-
-        return new Promise(function(resolve, reject) {
-        var request = new XMLHttpRequest();
-
-        request.open('GET', CURBSIDE_CHALLENGE_URL + '/' + path, true);
-            request.setRequestHeader()
-        request.onload = function() {
-            var status = request.status;
-            var responseContentType = request.getResponseHeader('Content-Type');
-            console.log(status);
-            console.log(responseContentType);
-
-            if (responseContentType === 'application/json' && status === 200) {
-                request.responseType = 'application/json';
-                resolve(request);
-            }
-            else if (responseContentType === 'application/json' && status === 404) {
-                console.log('received error message ' + responseContentType);
-                request.responseType = 'application/json';
-                resolve(request);
-            }
-            else {
-                reject(request);
-            }
+    Curbside.prototype.addMessage = function(data) {
+        this.message = {
+            id: data.id,
+            depth: data.depth
         };
+
+        if (data.hasOwnProperty('next')) {
+            this.message.next = data.next;
+        }
+
+        if (data.hasOwnProperty('secret')) {
+            this.message.secret = data.secret;
+        }
+
+        if (data.hasOwnProperty('message')) {
+            this.message.message = data.message;
+        }
+    };
+
+    function get() {
+        var path = nextUrl.shift();
+
+        console.log('get path is: ' + path);
+
+        return new Promise(function(success, failure) {
+            var request = new XMLHttpRequest();
+            if (path === undefined) {
+                failure('no more entries');
+            }
+            request.open('GET', CURBSIDE_CHALLENGE_URL + '/' + path);
+            if (sessionId) {
+                request.setRequestHeader('Session', sessionId);
+            }
+            request.addEventListener('load', function() {
+                if (request.status === 200) {
+                    success(request);
+                }
+                else {
+                    failure(request);
+                }
+            });
+            request.addEventListener('error', function() {
+                failure(new Error('Network error'));
+            });
             request.send();
         });
-    };
+    }
 
-    // Starts with start, which we know will throw an error since session is not available
+    function failedJsonError(data) {
+        if (data['error']) {
+            currentError.innerText = data['error'];
+            console.log(data);
+
+            if (data.error === '"Session" header is missing. "/get-session" to get a session id.') {
+                // previousFailedRequest.innerHTML = nextRequest.innerHTML;
+                // nextRequest.innerHTML = 'get-session';
+                // nextRequest.innerHTML = data.responseURL;
+                // nextUrl.unshift('get-session');
+                throw { name: 'MissingSessionId' };
+            }
+            else if (data.error === 'Invalid session id, a token is valid for 10 requests.') {
+                // previousFailedRequest.innerHTML = nextRequest.innerHTML;
+                // nextRequest.innerHTML = 'get-session';
+                // nextRequest.innerHTML = data.responseURL;
+                // nextUrl.unshift('get-session');
+                throw { name: 'MissingSessionId' };
+            }
+        }
+    }
+
+    function failedResponse (data) {
+        var respData;
+        currentError.innerText = error.statusText;
+
+        if (data.status === 404) {
+            try {
+                respData = JSON.parse(data.response);
+                failedJsonError(respData);
+            }
+            catch (e) {
+                if (e instanceof SyntaxError) {
+                    // JSON Parse throws Syntax error when input is not JSON
+                    console.log('failedResponse catch statement');
+                }
+                else if (e.name === 'MissingSessionId') {
+                    console.log(data.responseURL);
+                    var urlParse = document.createElement('a');
+                    urlParse.href = data.responseURL;
+                    console.log(urlParse);
+                    nextUrl.unshift(urlParse.pathname);
+                    nextUrl.unshift('get-session');
+                    console.log(nextUrl);
+                }
+            }
+
+            // Change way failures are handled. Figure out the failure,
+            // then move on straight from here.
+            // if ( )
+        }
+        return respData;
+    }
+
+    function propertyNames(inJson) {
+        var newObj = {};
+        Object.keys(inJson).forEach(function(key) {
+            newObj[key.toLowerCase()] = inJson[key];
+        });
+
+        return newObj;
+    }
+
+    function processData(data) {
+        // Force all keys to lower case;
+        var json = propertyNames(JSON.parse(data.response));
+        console.log(json);
+
+        if (json.next) {
+            if (json.next instanceof Array) {
+                console.log('next is an array');
+                Array.prototype.unshift.apply(nextUrl, json.next);
+                console.log(nextUrl);
+            }
+            else {
+                nextUrl.unshift(json.next);
+            }
+        }
+
+        if (json.secret) {
+            curbsideSecret += json.secret;
+        }
+    }
+
+    function successResponse(data) {
+        console.log(data);
+        if (data.responseURL.indexOf('get-session') >= 0) {
+            sessionId = data.response;
+            currentSessionId.innerHTML = data.response;
+            nextRequest.innerHTML = previousFailedRequest.innerHTML;
+            previousFailedRequest.innerHTML = 'None';
+        }
+        else {
+            processData(data);
+            // nextRequest.innerHTML = nextUrl.shift();
+        }
+
+        currentError.innerHTML = '';
+    }
+
+    button.addEventListener('click', main);
+
+    function main() {
+        secretElement.innerHTML = curbsideSecret;
+        if (!pending) {
+            if (nextUrl.length === 0) {
+                pending = false;
+            }
+            else {
+                pending = true;
+                (function () {
+                    get().then(function (data) {
+                        successResponse(data);
+
+                        pending = false;
+                        return true;
+                    }, function (error) {
+                        failedResponse(error);
+                        pending = false;
+                        return false;
+                    });
 
 
-    makeRequest('start').then(processResponse, processError);
+                })();
+            }
+        }
+        else {
+            console.log(lastResponse);
+        }
+        var now = Date.now();
+
+        if (now > timer) {
+            console.log('We are iterating');
+            return;
+        }
+        lastTime = now;
+        window.requestAnimationFrame(main);
+    }
+
+    main();
 })();
